@@ -1,23 +1,12 @@
-/*************************************************** 
-  This is an example for the Adafruit VS1053 Codec Breakout
-
-  Designed specifically to work with the Adafruit VS1053 Codec Breakout 
-  ----> https://www.adafruit.com/products/1381
-
-  Adafruit invests time and resources providing this open source code, 
-  please support Adafruit and open-source hardware by purchasing 
-  products from Adafruit!
-
-  Written by Limor Fried/Ladyada for Adafruit Industries.  
-  BSD license, all text above must be included in any redistribution
- ****************************************************/
-
-// include SPI, MP3 and SD libraries
 #include <Arduino.h>
 #include <SPI.h>
 #include <Adafruit_VS1053.h>
 #include <SD.h>
-#include "dynamicArray.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <Vector.h>
+#include <assert.h>
+#include <time.h>
 
 // These are the pins used for the music maker shield
 #define SHIELD_RESET  -1      // VS1053 reset pin (unused!)
@@ -29,19 +18,31 @@
 // DREQ should be an Int pin, see http://arduino.cc/en/Reference/attachInterrupt
 #define DREQ 3       // VS1053 Data request, ideally an Interrupt pin
 
+#define COIN_INPUT 8
+
+enum State {IDLE, PLAYING, SELECT_NORMAL, SELECT_ATTENTION};
+
+State state = IDLE;
+
+volatile int timer = 0;
+bool playAttention = false;
+
 Adafruit_VS1053_FilePlayer musicPlayer = 
   // create shield-example object!
   Adafruit_VS1053_FilePlayer(SHIELD_RESET, SHIELD_CS, SHIELD_DCS, DREQ, CARDCS);
 
-Array aMusicList;
+String oVoiceArray[3];
+Vector<String> oVoiceList(oVoiceArray);
 
-void printDirectory(File dir, int numTabs); 
+String oRandomArray[3];
+Vector<String> oRandomList(oRandomArray);
+
+void printDirectory(File dir, int numTabs);
+int freeMemory();
   
 void setup() {
   Serial.begin(9600);
   Serial.println("Adafruit VS1053 Simple Test");
-
-  initArray(&aMusicList, 5);
 
   if (! musicPlayer.begin()) { // initialise the music player
      Serial.println(F("Couldn't find VS1053, do you have the right pins defined?"));
@@ -54,109 +55,143 @@ void setup() {
     while (1);  // don't do anything more
   }
 
-  // list files
-  //printDirectory(SD.open("/"), 0);
+  File dir = SD.open("/v/");
   while(true) {
      
-    File entry = SD.open("/voice/").openNextFile();
+    File entry =  dir.openNextFile();
     if (! entry) {
       // no more files
       //Serial.println("**nomorefiles**");
       break;
     }
     
-    Serial.print(entry.name());
+    if(freeMemory() <= 21){
+      break;
+    }
+
+    oVoiceList.push_back(entry.name());
     
     if (entry.isDirectory()) {
       continue;
-    } else {
-      // files have sizes, directories do not
-      Serial.print("\t\t");
-      Serial.println(entry.size(), DEC);
     }
+
     entry.close();
   }
-  
-  
+
+  dir = SD.open("/r/");
+  while(true) {
+     
+    File entry =  dir.openNextFile();
+    if (! entry) {
+      break;
+    }
+    
+    if(freeMemory() < 21){
+      break;  
+    }
+
+    oRandomList.push_back(entry.name());
+    
+    if (entry.isDirectory()) {
+      continue;
+    }
+
+    entry.close();
+  }
+
   // Set volume for left, right channels. lower numbers == louder volume!
   musicPlayer.setVolume(10,10);
-
-  // Timer interrupts are not suggested, better to use DREQ interrupt!
-  //musicPlayer.useInterrupt(VS1053_FILEPLAYER_TIMER0_INT); // timer int
 
   // If DREQ is on an interrupt pin (on uno, #2 or #3) we can do background
   // audio playing
   musicPlayer.useInterrupt(VS1053_FILEPLAYER_PIN_INT);  // DREQ int
-  
-  // Play one file, don't return until complete
-  Serial.println(F("Playing track 001"));
-  musicPlayer.startPlayingFile("/voice/track001.mp3");
-  // Play another file in the background, REQUIRES interrupts!
+
+  pinMode(COIN_INPUT, INPUT_PULLUP);
+
+  srand(time(NULL));
+
+  //set timer 1 interrupt a 1 Hz
+  TCCR1A = 0;// set entire TCCR1A register to 0
+  TCCR1B = 0;// same for TCCR1B
+  TCNT1  = 0;//initialize counter value to 0
+  // set compare match register for 1hz increments
+  OCR1A = 15624;// = (16*10^6) / (1*1024) - 1 (must be <65536)
+  // turn on CTC mode
+  TCCR1B |= (1 << WGM12);
+  // Set CS10 and CS12 bits for 1024 prescaler
+  TCCR1B |= (1 << CS12) | (1 << CS10);  
+  // enable timer compare interrupt
+  TIMSK1 |= (1 << OCIE1A);
+
+  sei();
 }
+
+String prefix;
+String name;
+int r;
 
 void loop() {
-  // File is playing in the background
-  if (musicPlayer.stopped()) {
-    Serial.println("Done playing music");
-    while (1) {
-      delay(10);  // we're done! do nothing...
-    }
-  }
-  if (Serial.available()) {
-    char c = Serial.read();
+  switch (state)
+  {
+  case IDLE:
+    if(digitalRead(COIN_INPUT) == LOW)
+      state = SELECT_NORMAL;
+    else if(playAttention)
+      state = SELECT_ATTENTION;
+    break;
+  case SELECT_ATTENTION:
+    r = rand() % oRandomList.size();
+    name = oRandomList.at(r);
+    prefix = "/r/";
+    prefix += name;
+    musicPlayer.startPlayingFile(prefix.c_str());
+    state = PLAYING;
+    break;
+  case SELECT_NORMAL:
+    r = rand() % oVoiceList.size();
+    name = oVoiceList.at(r);
+    prefix = "/v/";
+    prefix += name;
+    musicPlayer.startPlayingFile(prefix.c_str());
+    state = PLAYING;
+    break;
+  case PLAYING:
+    if(!musicPlayer.playingMusic)
+      state = IDLE;
     
-    // if we get an 's' on the serial console, stop!
-    if (c == 's') {
-      musicPlayer.stopPlaying();
-    }
-
-    if(c == 'n'){
-      musicPlayer.stopPlaying();
-      musicPlayer.startPlayingFile("/voice/track002.mp3");
-    }
-    
-    // if we get an 'p' on the serial console, pause/unpause!
-    if (c == 'p') {
-      if (! musicPlayer.paused()) {
-        Serial.println("Paused");
-        musicPlayer.pausePlaying(true);
-      } else { 
-        Serial.println("Resumed");
-        musicPlayer.pausePlaying(false);
-      }
-    }
+    //TODO implement Ludo's code
+    break;
+  default:
+    break;
   }
+}
 
-  delay(100);
+//
+// Used in calculating free memory.
+//
+extern unsigned int __bss_end;
+extern void *__brkval;
+
+//
+// Returns the current amount of free memory in bytes.
+//
+int freeMemory() {
+	int free_memory;
+	if ((int) __brkval)
+		return ((int) &free_memory) - ((int) __brkval);
+	return ((int) &free_memory) - ((int) &__bss_end);
+}
+
+ISR(TIMER1_COMPA_vect){
+  if(state == IDLE){
+    timer++;
+    if(timer == 300){
+      playAttention = true;
+      timer = 0;
+    }
+  }else{
+    timer = 0;
+  }
 }
 
 
-/// File listing helper
-void printDirectory(File dir, int numTabs) {
-   while(true) {
-     
-     File entry =  dir.openNextFile();
-     if (! entry) {
-       // no more files
-       //Serial.println("**nomorefiles**");
-       break;
-     }
-     for (uint8_t i=0; i<numTabs; i++) {
-       Serial.print('\t');
-     }
-     Serial.print(entry.name());
-     if (entry.isDirectory()) {
-       Serial.println("/");
-       printDirectory(entry, numTabs+1);
-     } else {
-       // files have sizes, directories do not
-       Serial.print("\t\t");
-       Serial.println(entry.size(), DEC);
-     }
-     entry.close();
-   }
-}
-
-void addSongToList(char* cSongList[], char* cSongName){
-
-}
